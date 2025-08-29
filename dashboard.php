@@ -1,711 +1,347 @@
 <?php
 session_start();
-require '../config/db.php';
-
-// Check admin authentication
-if (!isset($_SESSION['user_id']) || !isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'employee') {
     header('Location: ../login.php');
-    exit();
-}
-
-// Get admin's proper name
-$adminName = 'Admin';
-if (isset($_SESSION['username']) && !empty($_SESSION['username'])) {
-    $adminName = $_SESSION['username'];
-}
-
-// Try to get full name from database if available
-try {
-    $conn = new PDO("mysql:host=localhost;dbname=ems", 'root', '');
-    $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    
-    if (isset($_SESSION['user_id'])) {
-        $stmt = $conn->prepare("SELECT full_name FROM employees WHERE user_id = ?");
-        $stmt->execute([$_SESSION['user_id']]);
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($result && !empty($result['full_name'])) {
-            $adminName = $result['full_name'];
-        }
-    }
-} catch(PDOException $e) {
-    // Keep default name if database error
-}
-
-// Database queries for dashboard statistics
-$dashboardData = [];
-
-try {
-    $conn = new PDO("mysql:host=localhost;dbname=ems", 'root', '');
-    $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    
-    $total_emp_query = $conn->query("SELECT COUNT(*) as count FROM employees");
-    $total_emp_result = $total_emp_query->fetch(PDO::FETCH_ASSOC);
-    $dashboardData['total_employees'] = $total_emp_result['count'] ?? 0;
-    
-    $active_emp_query = $conn->query("SELECT COUNT(*) as count FROM employees e INNER JOIN users u ON e.user_id = u.id WHERE u.is_approved = 1 AND u.role = 'employee'");
-    $active_emp_result = $active_emp_query->fetch(PDO::FETCH_ASSOC);
-    $dashboardData['approved_employees'] = $active_emp_result['count'] ?? 0;
-    
-    $today = date('Y-m-d');
-    $present_today = $conn->query("SELECT COUNT(*) as count FROM attendance WHERE date = '$today' AND status = 'Present'")->fetch(PDO::FETCH_ASSOC);
-    $total_today = $conn->query("SELECT COUNT(*) as count FROM attendance WHERE date = '$today'")->fetch(PDO::FETCH_ASSOC);
-    $dashboardData['present_today'] = $present_today['count'] ?? 0;
-    $dashboardData['total_today'] = $total_today['count'] ?? 0;
-    $dashboardData['attendance_rate'] = $dashboardData['total_today'] > 0 ? round(($dashboardData['present_today'] / $dashboardData['total_today']) * 100) : 0;
-    
-    $pending_leaves = $conn->query("SELECT COUNT(*) as count FROM leave_requests WHERE status = 'Pending'")->fetch(PDO::FETCH_ASSOC);
-    $dashboardData['pending_leaves'] = $pending_leaves['count'] ?? 0;
-    
-    $active_departments = $conn->query("SELECT COUNT(DISTINCT department) as count FROM employees WHERE department IS NOT NULL AND department != ''")->fetch(PDO::FETCH_ASSOC);
-    $dashboardData['active_departments'] = $active_departments['count'] ?? 0;
-    
-    // SHOW ONLY 3 RECENT LEAVE REQUESTS (as per your request)
-    $recent_leaves = $conn->query("SELECT lr.*, e.full_name as employee_name FROM leave_requests lr LEFT JOIN employees e ON lr.employee_id = e.id ORDER BY lr.created_at DESC LIMIT 3")->fetchAll(PDO::FETCH_ASSOC);
-    $dashboardData['recent_leaves'] = $recent_leaves;
-    
-    $dept_stats = $conn->query("SELECT department, COUNT(*) as count FROM employees WHERE department IS NOT NULL AND department != '' GROUP BY department")->fetchAll(PDO::FETCH_ASSOC);
-    $dashboardData['department_stats'] = $dept_stats;
-    
-    $pending_approval = $conn->query("SELECT COUNT(*) as count FROM employees e INNER JOIN users u ON e.user_id = u.id WHERE u.is_approved = 0 AND u.role = 'employee'");
-    $pending_result = $pending_approval->fetch(PDO::FETCH_ASSOC);
-    $dashboardData['pending_employees'] = $pending_result['count'] ?? 0;
-    
-} catch(PDOException $e) {
-    error_log("Dashboard Database Error: " . $e->getMessage());
-    $dashboardData = [
-        'total_employees' => 0,
-        'present_today' => 0,
-        'total_today' => 0,
-        'attendance_rate' => 0,
-        'pending_leaves' => 0,
-        'active_departments' => 0,
-        'recent_leaves' => [],
-        'department_stats' => [],
-        'approved_employees' => 0,
-        'pending_employees' => 0
-    ];
-}
-
-if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
-    header('Content-Type: application/json');
-    echo json_encode($dashboardData);
     exit;
 }
+
+require '../config/db.php';
+
+$user_id = $_SESSION['user_id'];
+$username = $_SESSION['username'];
+
+try {
+    // Get employee information
+    $emp_stmt = $pdo->prepare("SELECT * FROM employees WHERE user_id = ?");
+    $emp_stmt->execute([$user_id]);
+    $employee = $emp_stmt->fetch(PDO::FETCH_ASSOC);
+    
+    // Get attendance summary for current month
+    $current_month = date('Y-m');
+    $attendance_stmt = $pdo->prepare("SELECT 
+        COUNT(*) as total_days,
+        SUM(CASE WHEN status = 'Present' THEN 1 ELSE 0 END) as present_days,
+        SUM(CASE WHEN status = 'Absent' THEN 1 ELSE 0 END) as absent_days
+        FROM attendance 
+        WHERE employee_id = ? AND DATE_FORMAT(date, '%Y-%m') = ?");
+    $attendance_stmt->execute([$user_id, $current_month]);
+    $attendance = $attendance_stmt->fetch(PDO::FETCH_ASSOC);
+    
+    // Calculate attendance percentage
+    $attendance_rate = $attendance['total_days'] > 0 ? 
+        round(($attendance['present_days'] / $attendance['total_days']) * 100) : 0;
+    
+    // Get recent leave requests
+    $leaves_stmt = $pdo->prepare("SELECT * FROM leave_requests WHERE employee_id = ? ORDER BY created_at DESC LIMIT 5");
+    $leaves_stmt->execute([$user_id]);
+    $recent_leaves = $leaves_stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Get pending leave count
+    $pending_leaves_stmt = $pdo->prepare("SELECT COUNT(*) as pending FROM leave_requests WHERE employee_id = ? AND status = 'Pending'");
+    $pending_leaves_stmt->execute([$user_id]);
+    $pending_leaves = $pending_leaves_stmt->fetch(PDO::FETCH_ASSOC)['pending'];
+    
+    // Get today's attendance status
+    $today = date('Y-m-d');
+    $today_attendance_stmt = $pdo->prepare("SELECT status FROM attendance WHERE employee_id = ? AND date = ?");
+    $today_attendance_stmt->execute([$user_id, $today]);
+    $today_status = $today_attendance_stmt->fetch(PDO::FETCH_ASSOC);
+    
+} catch(PDOException $e) {
+    $attendance = ['total_days' => 0, 'present_days' => 0, 'absent_days' => 0];
+    $recent_leaves = [];
+    $pending_leaves = 0;
+    $attendance_rate = 0;
+    $today_status = null;
+}
+
+include '../includes/header.php';
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin Dashboard - Employee Management System</title>
-<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
 <style>
 body {
     font-family: 'Poppins', sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     min-height: 100vh;
-    margin: 0;
     color: white;
-}
-
-/* NAVBAR: EMS BRAND ON THE EXTREME LEFT, NO GAP */
-.navbar {
-    background: rgba(255, 255, 255, 0.1) !important;
-    backdrop-filter: blur(20px);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-    padding: 15px 0;
-}
-
-.navbar-brand {
-    color: white !important;
-    font-weight: 500;
-    margin-left: 0;
-    padding-left: 0;
-}
-
-.navbar-nav {
-    margin-left: auto;
-}
-
-.nav-link {
-    color: white !important;
-    font-weight: 500;
-    transition: all 0.3s ease;
-}
-
-.nav-link:hover {
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    transform: translateY(-2px);
-}
-
-.container-main {
-    background: rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(15px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 15px;
-    padding: 30px;
-    margin: 20px auto;
-    color: white;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.1);
 }
 
 .glass-card {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.15);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 15px;
-    padding: 20px;
-    margin-bottom: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 20px;
+    padding: 25px;
+    margin-bottom: 25px;
+    box-shadow: 0 25px 50px rgba(0, 0, 0, 0.1);
     color: white;
     transition: all 0.3s ease;
 }
 
 .glass-card:hover {
     transform: translateY(-5px);
-    box-shadow: 0 15px 35px rgba(0,0,0,0.2);
+    box-shadow: 0 35px 60px rgba(0, 0, 0, 0.15);
 }
 
 .stat-card {
-    background: rgba(255, 255, 255, 0.15);
-    backdrop-filter: blur(15px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 15px;
-    padding: 20px;
+    padding: 25px;
     text-align: center;
-    transition: all 0.3s ease;
-    height: 160px;
+    height: 180px;
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
-    align-items: center;
-    color: white;
-    position: relative;
+    justify-content: center;
+    transition: all 0.3s ease;
 }
 
 .stat-card:hover {
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.2);
     transform: translateY(-8px);
-    box-shadow: 0 20px 40px rgba(0,0,0,0.2);
-}
-
-.stat-icon {
-    font-size: 1.6rem;
-    color: #ff7f50;
-    margin: 0;
-    position: absolute;
-    top: 5px;
-    left: 50%;
-    transform: translateX(-50%);
 }
 
 .stat-number {
-    font-size: 2.8rem;
+    font-size: 2.5rem;
     font-weight: 700;
-    color: white;
-    margin: 0;
-    text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    margin-bottom: 8px;
+    background: linear-gradient(45deg, #fff, #e0e0e0);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
 
 .stat-label {
-    color: white;
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
+    font-size: 1rem;
+    font-weight: 500;
+    opacity: 0.9;
     text-transform: uppercase;
-    text-align: center;
-    position: absolute;
-    bottom: 15px;
-    left: 0;
-    right: 0;
-    margin: 0;
-    padding: 0 10px;
+    letter-spacing: 0.5px;
 }
 
-.quick-actions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 20px;
-    margin: 20px 0;
+.stat-icon {
+    font-size: 2.5rem;
+    margin-bottom: 15px;
+    background: linear-gradient(135deg, #ff6b6b, #ffa500);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
 
-.quick-action {
+.list-group-item {
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.2);
-    border-radius: 12px;
+    border-radius: 12px !important;
+    margin-bottom: 10px;
+    color: white;
+    font-weight: 500;
+    transition: all 0.3s ease;
     padding: 20px;
-    text-align: center;
-    text-decoration: none;
-    color: white;
-    transition: all 0.3s ease;
-    position: relative;
-    overflow: hidden;
 }
 
-.quick-action:hover {
+.list-group-item:hover {
     background: rgba(255, 255, 255, 0.2);
-    transform: translateY(-5px);
     color: white;
-    text-decoration: none;
-    box-shadow: 0 15px 35px rgba(0,0,0,0.2);
-}
-
-.activity-item {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    padding: 15px;
-    margin-bottom: 15px;
-    transition: all 0.3s ease;
-}
-
-.activity-item:hover {
-    background: rgba(255, 255, 255, 0.1);
-    transform: translateX(5px);
-}
-
-.loading-spinner {
-    width: 20px;
-    height: 20px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-left: 2px solid #4ade80;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    display: inline-block;
-    margin-left: 10px;
-}
-
-.update-indicator {
-    position: fixed;
-    top: 80px;
-    right: 20px;
-    background: rgba(40, 167, 69, 0.9);
-    color: white;
-    padding: 10px 15px;
-    border-radius: 8px;
-    font-size: 14px;
-    z-index: 1000;
-    opacity: 0;
-    transform: translateY(-20px);
-    transition: all 0.3s ease;
-}
-
-.update-indicator.show {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
+    transform: translateX(10px);
 }
 
 .badge {
-    font-size: 0.75rem;
-    padding: 4px 8px;
+    font-size: 0.8rem;
+    padding: 6px 12px;
 }
 
-@media (max-width: 768px) {
-    .container-main {
-        padding: 20px;
-        margin: 10px;
-    }
-    
-    .stat-card {
-        height: 140px;
-        padding: 15px;
-    }
-    
-    .stat-number {
-        font-size: 2.2rem;
-    }
-    
-    .stat-label {
-        font-size: 12px;
-        bottom: 10px;
-    }
-    
-    .stat-icon {
-        font-size: 1.3rem;
-        top: 4px;
-    }
-}
+.status-present { background: rgba(40, 167, 69, 0.8); }
+.status-absent { background: rgba(220, 53, 69, 0.8); }
+.status-pending { background: rgba(255, 193, 7, 0.8); }
+.status-approved { background: rgba(40, 167, 69, 0.8); }
+.status-rejected { background: rgba(220, 53, 69, 0.8); }
 </style>
-</head>
-<body>
 
-<!-- NAVIGATION - EMS BRAND ON THE EXTREME LEFT -->
-<nav class="navbar navbar-expand-lg">
-    <div class="container-fluid px-2"> <!-- Adjusted for no left gap -->
-        <a class="navbar-brand" href="../index.php">
-            <i class="fas fa-users"></i> EMS
-        </a>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-        <div class="collapse navbar-collapse" id="navbarNav">
-            <ul class="navbar-nav ms-auto">
-                <li class="nav-item">
-                    <a class="nav-link" href="dashboard.php">
-                        <i class="fas fa-tachometer-alt"></i> Dashboard
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="employees.php">
-                        <i class="fas fa-users"></i> Employees
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="employees_add.php">
-                        <i class="fas fa-user-plus"></i> Add Employee
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="attendance.php">
-                        <i class="fas fa-calendar-check"></i> Attendance
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="leaves.php">
-                        <i class="fas fa-plane"></i> Leaves
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="assign_project.php">
-                        <i class="fas fa-tasks"></i> Assign Project
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="project_status.php">
-                        <i class="fas fa-clipboard-check"></i>  Project Status
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="up_pass.php">
-                        <i class="fas fa-key"></i>  Up Pass
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="payroll.php">
-                        <i class="fas fa-money-bill-wave"></i> Payroll
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <span class="nav-link">Welcome, <?= htmlspecialchars($adminName) ?></span>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="../logout.php">
-                        <i class="fas fa-sign-out-alt"></i> Logout
-                    </a>
-                </li>
-            </ul>
-        </div>
+Navigation
+<nav class="navbar navbar-expand-lg" style="background: rgba(0, 0, 0, 0.1); backdrop-filter: blur(10px);">
+<div class="container">
+    <a class="navbar-brand text-white" href="dashboard.php">
+        <i class="fas fa-user-circle me-2"></i>EMS Employee
+    </a>
+    <div class="navbar-nav ms-auto">
+        <a class="nav-link text-white" href="dashboard.php">Dashboard</a>
+        <a class="nav-link text-white" href="profile.php">Profile</a>
+        <a class="nav-link text-white" href="attendance.php">Attendance</a>
+        <a class="nav-link text-white" href="myproject.php">My Project</a>
+        <a class="nav-link text-white" href="leave_request.php">Leave</a>
+        <span class="nav-link text-white">Welcome, <?= htmlspecialchars($employee['full_name'] ?? $username) ?></span>
+        <a class="nav-link text-white" href="../logout.php">Logout</a>
     </div>
+</div>
 </nav>
 
-<!-- Update Indicator -->
-<div class="update-indicator" id="updateIndicator">
-<i class="fas fa-sync-alt me-2"></i>Dashboard updated
-</div>
-
 <div class="container mt-4">
-<div class="container-main">
+    <!-- Welcome Header -->
+    <div class="glass-card text-center">
+        <h1 class="mb-3">
+            <i class="fas fa-tachometer-alt me-3"></i>
+            Welcome, <?= htmlspecialchars($employee['full_name'] ?? $username) ?>!
+        </h1>
+        <p class="mb-0">Employee Dashboard • <?= date('l, F j, Y') ?></p>
+        
+        <?php if ($today_status): ?>
+            <div class="mt-3">
+                <span class="badge <?= $today_status['status'] == 'Present' ? 'status-present' : 'status-absent' ?> fs-6">
+                    Today: <?= $today_status['status'] ?>
+                </span>
+            </div>
+        <?php else: ?>
+            <div class="mt-3">
+                <span class="badge bg-warning text-dark fs-6">
+                    Today: Not Marked
+                </span>
+            </div>
+        <?php endif; ?>
+    </div>
 
-<!-- Dashboard Header -->
-<div class="glass-card">
-    <div class="row align-items-center">
-        <div class="col-md-8">
-            <h1 class="mb-2">
-                <i class="fas fa-chart-line me-3"></i>
-                Welcome back, <?= htmlspecialchars($adminName) ?>!
-            </h1>
-            <p class="mb-0" style="color: rgba(255, 255, 255, 0.8);">
-                Here's what's happening with your business today • <span id="currentDateTime"><?php echo date('l, F j, Y'); ?></span>
-                <span class="loading-spinner" id="loadingIndicator" style="display: none;"></span>
-            </p>
+    <!-- Statistics Cards -->
+    <div class="row mb-4">
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon">
+                    <i class="fas fa-calendar-check"></i>
+                </div>
+                <div class="stat-number"><?= $attendance['present_days'] ?? 0 ?></div>
+                <div class="stat-label">Present This Month</div>
+            </div>
         </div>
-        <div class="col-md-4 text-end">
-            <div class="d-flex gap-3 justify-content-end align-items-center">
-                <div class="text-center">
-                    <div style="font-size: 2rem; color: #4ade80;">
-                        <i class="fas fa-database"></i>
-                    </div>
-                    <small style="color: rgba(255, 255, 255, 0.6);">Live Data</small>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon">
+                    <i class="fas fa-calendar-times"></i>
+                </div>
+                <div class="stat-number"><?= $attendance['absent_days'] ?? 0 ?></div>
+                <div class="stat-label">Absent Days</div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon">
+                    <i class="fas fa-plane"></i>
+                </div>
+                <div class="stat-number"><?= $pending_leaves ?></div>
+                <div class="stat-label">Pending Leaves</div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon">
+                    <i class="fas fa-percentage"></i>
+                </div>
+                <div class="stat-number"><?= $attendance_rate ?>%</div>
+                <div class="stat-label">Attendance Rate</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Quick Actions -->
+        <div class="col-lg-8">
+            <div class="glass-card">
+                <h3><i class="fas fa-bolt text-warning me-2"></i>Quick Actions</h3>
+                <div class="list-group">
+                    <a href="profile.php" class="list-group-item list-group-item-action">
+                        <i class="fas fa-user me-3"></i>👤 My Profile
+                        <small class="text-muted d-block">View and update personal information</small>
+                    </a>
+                    <a href="attendance.php" class="list-group-item list-group-item-action">
+                        <i class="fas fa-clock me-3"></i>🗓 Mark / View Attendance
+                        <small class="text-muted d-block">Mark today's attendance or view history</small>
+                    </a>
+                    <a href="leave_request.php" class="list-group-item list-group-item-action">
+                        <i class="fas fa-plane me-3"></i>📝 Apply for Leave
+                        <small class="text-muted d-block">Submit new leave requests</small>
+                    </a>
+                    <a href="salary.php" class="list-group-item list-group-item-action">
+                        <i class="fas fa-money-bill-wave me-3"></i>💰 View Salary
+                        <small class="text-muted d-block">Check salary details and payslips</small>
+                    </a>
                 </div>
             </div>
         </div>
-    </div>
-</div>
 
-<!-- Main Statistics -->
-<div class="row g-4 mb-4">
-    <div class="col-xl-3 col-md-6">
-        <div class="stat-card">
-            <div class="stat-icon">
-                <i class="fas fa-users"></i>
-            </div>
-            <div class="stat-number" id="totalEmployees"><?php echo $dashboardData['total_employees']; ?></div>
-            <div class="stat-label">Total Employees</div>
-        </div>
-    </div>
-    <div class="col-xl-3 col-md-6">
-        <div class="stat-card">
-            <div class="stat-icon">
-                <i class="fas fa-user-check"></i>
-            </div>
-            <div class="stat-number" id="approvedEmployees"><?php echo $dashboardData['approved_employees']; ?></div>
-            <div class="stat-label">Active Employees</div>
-        </div>
-    </div>
-    <div class="col-xl-3 col-md-6">
-        <div class="stat-card">
-            <div class="stat-icon">
-                <i class="fas fa-calendar-check"></i>
-            </div>
-            <div class="stat-number" id="attendanceRate"><?php echo $dashboardData['attendance_rate']; ?>%</div>
-            <div class="stat-label">Attendance Rate</div>
-        </div>
-    </div>
-    <div class="col-xl-3 col-md-6">
-        <div class="stat-card">
-            <div class="stat-icon">
-                <i class="fas fa-clock"></i>
-            </div>
-            <div class="stat-number" id="activeDepartments"><?php echo $dashboardData['active_departments']; ?></div>
-            <div class="stat-label">Active Departments</div>
-        </div>
-    </div>
-</div>
-
-<!-- Quick Actions -->
-<div class="glass-card mb-4">
-    <h3 class="text-white mb-4">
-        <i class="fas fa-bolt text-warning me-2"></i>
-        Quick Actions
-    </h3>
-    <div class="quick-actions">
-        <a href="employees_add.php" class="quick-action" style="background: linear-gradient(135deg, #28a745, #20c997);">
-            <div style="font-size: 2.5rem; margin-bottom: 15px; color: white;">
-                <i class="fas fa-user-plus"></i>
-            </div>
-            <div style="font-size: 1.1rem; font-weight: 600;">Add Employee</div>
-            <div style="font-size: 0.9rem; color: rgba(255, 255, 255, 0.7);">Create new employee account</div>
-        </a>
-        <a href="employees.php" class="quick-action">
-            <div style="font-size: 2.5rem; margin-bottom: 15px; color: #4ade80;">
-                <i class="fas fa-users"></i>
-            </div>
-            <div style="font-size: 1.1rem; font-weight: 600;">View All Employees</div>
-            <div style="font-size: 0.9rem; color: rgba(255, 255, 255, 0.7);">Manage employee records</div>
-        </a>
-        <a href="attendance.php" class="quick-action">
-            <div style="font-size: 2.5rem; margin-bottom: 15px; color: #4ade80;">
-                <i class="fas fa-calendar-check"></i>
-            </div>
-            <div style="font-size: 1.1rem; font-weight: 600;">Attendance</div>
-            <div style="font-size: 0.9rem; color: rgba(255, 255, 255, 0.7);">Track daily attendance</div>
-        </a>
-        <a href="leaves.php" class="quick-action">
-            <div style="font-size: 2.5rem; margin-bottom: 15px; color: #4ade80;">
-                <i class="fas fa-plane"></i>
-            </div>
-            <div style="font-size: 1.1rem; font-weight: 600;">Manage Leaves</div>
-            <div style="font-size: 0.9rem; color: rgba(255, 255, 255, 0.7);">Approve leave requests</div>
-        </a>
-        <a href="payroll.php" class="quick-action">
-            <div style="font-size: 2.5rem; margin-bottom: 15px; color: #4ade80;">
-                <i class="fas fa-money-bill-wave"></i>
-            </div>
-            <div style="font-size: 1.1rem; font-weight: 600;">Generate Payroll</div>
-            <div style="font-size: 0.9rem; color: rgba(255, 255, 255, 0.7);">Process salary payments</div>
-        </a>
-    </div>
-</div>
-
-<!-- Content Row -->
-<div class="row g-4">
-    <!-- Recent Activity -->
-    <div class="col-lg-8">
-        <div class="glass-card h-100">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h3 class="text-white">
-                    <i class="fas fa-history text-info me-2"></i>
-                    Recent Leave Requests
-                </h3>
-                <a href="leaves.php" class="btn btn-sm" style="background: linear-gradient(135deg, #4ade80, #22c55e); color: white; border: none; border-radius: 25px;">
-                    View All
-                </a>
-            </div>
-            <div id="recentLeaves">
-                <?php if (empty($dashboardData['recent_leaves'])): ?>
-                    <div class="text-center py-5">
-                        <i class="fas fa-inbox fa-4x mb-3" style="color: rgba(255, 255, 255, 0.3);"></i>
-                        <h5 class="text-white mb-2">No Recent Activity</h5>
-                        <p style="color: rgba(255, 255, 255, 0.6);">Leave requests will appear here</p>
+        <!-- Recent Activity -->
+        <div class="col-lg-4">
+            <div class="glass-card">
+                <h3><i class="fas fa-history text-info me-2"></i>Recent Leaves</h3>
+                
+                <?php if (empty($recent_leaves)): ?>
+                    <div class="text-center py-4">
+                        <i class="fas fa-calendar fa-3x mb-3" style="color: rgba(255, 255, 255, 0.3);"></i>
+                        <p style="color: rgba(255, 255, 255, 0.6);">No leave requests yet</p>
+                        <a href="leave_request.php" class="btn btn-primary btn-sm">Apply for Leave</a>
                     </div>
                 <?php else: ?>
-                    <?php foreach($dashboardData['recent_leaves'] as $leave): ?>
-                        <div class="activity-item">
+                    <?php foreach($recent_leaves as $leave): ?>
+                        <div style="background: rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 12px; margin-bottom: 10px;">
                             <div class="d-flex justify-content-between align-items-center">
                                 <div>
-                                    <strong><?php echo htmlspecialchars($leave['employee_name'] ?? 'Unknown Employee'); ?></strong>
-                                    <span style="color: rgba(255, 255, 255, 0.7);"> requested </span>
-                                    <strong><?php echo htmlspecialchars($leave['leave_type']); ?></strong>
+                                    <strong><?= htmlspecialchars($leave['leave_type']) ?></strong>
+                                    <br>
+                                    <small style="color: rgba(255, 255, 255, 0.7);">
+                                        <?= date('M d', strtotime($leave['start_date'])) ?> - <?= date('M d', strtotime($leave['end_date'])) ?>
+                                    </small>
                                 </div>
                                 <div>
                                     <?php
-                                    $badge_class = 'warning';
-                                    if ($leave['status'] == 'Approved') $badge_class = 'success';
-                                    if ($leave['status'] == 'Rejected') $badge_class = 'danger';
+                                    $status_class = 'status-pending';
+                                    if ($leave['status'] == 'Approved') $status_class = 'status-approved';
+                                    if ($leave['status'] == 'Rejected') $status_class = 'status-rejected';
                                     ?>
-                                    <span class="badge bg-<?php echo $badge_class; ?>"><?php echo $leave['status']; ?></span>
+                                    <span class="badge <?= $status_class ?>"><?= $leave['status'] ?></span>
                                 </div>
                             </div>
-                            <small style="color: rgba(255, 255, 255, 0.5);">
-                                <?php echo date('M d, Y', strtotime($leave['created_at'])); ?> •
-                                <?php echo date('M d', strtotime($leave['start_date'])); ?> to <?php echo date('M d', strtotime($leave['end_date'])); ?>
-                            </small>
                         </div>
                     <?php endforeach; ?>
-                    <!-- "View More" button after recent leaves -->
                     <div class="text-center mt-3">
-                        <a href="leaves.php" class="btn btn-outline-light btn-sm">View More <i class="fas fa-chevron-right ms-1"></i></a>
+                        <a href="leave_request.php" class="btn btn-outline-light btn-sm">View All Leaves</a>
                     </div>
                 <?php endif; ?>
             </div>
-        </div>
-    </div>
-    
-    <!-- Department Analytics -->
-    <div class="col-lg-4">
-        <div class="glass-card h-100">
-            <h3 class="text-white mb-4">
-                <i class="fas fa-chart-pie text-success me-2"></i>
-                Department Overview
-            </h3>
-            <div id="departmentStats">
-                <?php if (empty($dashboardData['department_stats'])): ?>
-                    <div class="text-center py-4">
-                        <i class="fas fa-building fa-3x mb-3" style="color: rgba(255, 255, 255, 0.3);"></i>
-                        <p style="color: rgba(255, 255, 255, 0.6);">No department data available</p>
-                    </div>
-                <?php else: ?>
-                    <?php foreach($dashboardData['department_stats'] as $dept): ?>
-                        <div class="d-flex justify-content-between align-items-center mb-3 p-2" style="background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
-                            <span><?php echo htmlspecialchars($dept['department']); ?></span>
-                            <strong><?php echo $dept['count']; ?> employees</strong>
-                        </div>
-                    <?php endforeach; ?>
-                <?php endif; ?>
+
+            <!-- Employee Info -->
+            <div class="glass-card">
+                <h3><i class="fas fa-id-card text-success me-2"></i>My Info</h3>
+                <div class="employee-info">
+                    <p><strong>Name:</strong> <?= htmlspecialchars($employee['full_name'] ?? 'Not set') ?></p>
+                    <p><strong>Employee ID:</strong> EMP-<?= str_pad($user_id, 4, '0', STR_PAD_LEFT) ?></p>
+                    <p><strong>Department:</strong> <?= htmlspecialchars($employee['department'] ?? 'Not assigned') ?></p>
+                    <p><strong>Position:</strong> <?= htmlspecialchars($employee['position'] ?? 'Not assigned') ?></p>
+                    <p><strong>Join Date:</strong> <?= $employee['join_date'] ? date('M d, Y', strtotime($employee['join_date'])) : 'Not set' ?></p>
+                </div>
+                <a href="profile.php" class="btn btn-outline-light btn-sm w-100 mt-2">
+                    <i class="fas fa-edit me-2"></i>Edit Profile
+                </a>
             </div>
         </div>
     </div>
 </div>
 
-</div> <!-- Close container-main -->
-</div> <!-- Close container -->
+<?php include '../includes/footer.php'; ?>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
 <script>
-// Enhanced dashboard JavaScript
-let updateInterval;
-let isUpdating = false;
+// Add hover effects
+document.querySelectorAll('.stat-card').forEach(card => {
+    card.addEventListener('mouseenter', () => {
+        card.style.transform = 'translateY(-8px) scale(1.02)';
+    });
+    card.addEventListener('mouseleave', () => {
+        card.style.transform = 'translateY(0) scale(1)';
+    });
+});
 
-// Function to update dashboard data
-async function updateDashboardData() {
-    if (isUpdating) return;
-    isUpdating = true;
-    const loadingIndicator = document.getElementById('loadingIndicator');
-    const updateIndicator = document.getElementById('updateIndicator');
-    
-    try {
-        loadingIndicator.style.display = 'inline-block';
-        const response = await fetch('dashboard.php?ajax=1', {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json', }
-        });
-        if (!response.ok) throw new Error('Network response was not ok');
-        const data = await response.json();
-        updateElement('totalEmployees', data.total_employees);
-        updateElement('approvedEmployees', data.approved_employees);
-        updateElement('attendanceRate', data.attendance_rate + '%');
-        updateElement('activeDepartments', data.active_departments);
-        document.getElementById('currentDateTime').textContent = new Date().toLocaleDateString('en-US', {
-            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
-        });
-        updateIndicator.classList.add('show');
-        setTimeout(() => { updateIndicator.classList.remove('show'); }, 2000);
-        console.log('Dashboard updated successfully');
-    } catch (error) {
-        console.error('Error updating dashboard:', error);
-    } finally {
-        loadingIndicator.style.display = 'none';
-        isUpdating = false;
-    }
-}
-
-// Helper function to update element with animation
-function updateElement(id, newValue) {
-    const element = document.getElementById(id);
-    if (element && element.textContent !== newValue.toString()) {
-        element.style.transform = 'scale(1.1)';
-        element.style.color = '#4ade80';
-        element.textContent = newValue;
+// Add click animation to quick actions
+document.querySelectorAll('.list-group-item').forEach(item => {
+    item.addEventListener('click', () => {
+        item.style.transform = 'scale(0.98)';
         setTimeout(() => {
-            element.style.transform = 'scale(1)';
-            element.style.color = '';
-        }, 300);
-    }
-}
-
-// Initialize real-time updates
-function startRealTimeUpdates() {
-    updateInterval = setInterval(updateDashboardData, 30000);
-    console.log('Real-time updates started (30 second interval)');
-}
-
-// Initialize when page loads
-document.addEventListener('DOMContentLoaded', function() {
-    startRealTimeUpdates();
-    document.querySelectorAll('.stat-card').forEach(card => {
-        card.addEventListener('mouseenter', () => {
-            card.style.transform = 'translateY(-8px) scale(1.02)';
-        });
-        card.addEventListener('mouseleave', () => {
-            card.style.transform = 'translateY(0) scale(1)';
-        });
+            item.style.transform = 'translateX(10px)';
+        }, 100);
     });
-    document.querySelectorAll('.quick-action').forEach(action => {
-        action.addEventListener('mouseenter', () => {
-            action.style.transform = 'translateY(-5px) scale(1.02)';
-        });
-        action.addEventListener('mouseleave', () => {
-            action.style.transform = 'translateY(0) scale(1)';
-        });
-    });
-});
-
-// Stop updates when page is hidden
-document.addEventListener('visibilitychange', function() {
-    if (document.hidden) {
-        clearInterval(updateInterval);
-    } else {
-        startRealTimeUpdates();
-        updateDashboardData();
-    }
-});
-
-// Cleanup on page unload
-window.addEventListener('beforeunload', function() {
-    clearInterval(updateInterval);
 });
 </script>
-</body>
-</html>
